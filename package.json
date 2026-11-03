@@ -1,6 +1,6 @@
 {
   "name": "paseo-plugin-sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Sync Paseo plugins across hosts through a GitHub repository.",
   "scripts": {

@@ -181,6 +181,7 @@ recycle-bin   ☑ fnOS    ☑ HomeWindows
 | 目标机没收到 | 目标机是否在线、轮询是否开启、源主机 `targets` 是否包含目标文件夹名、目标机日志 |
 | `conflict` | 来源类型不同，或目标机路径受管；让用户确认是否 `remove` 后重装 |
 | `npm ci` 失败 | 目标机没有 npm、或网络不通；改用 git/npm 源 |
+| `Could not resolve type dependency "@getpaseo/client"` | 0.1.1 起会自动补装类型依赖；先 `paseo plugin update plugin-sync --yes` 再等一轮同步 |
 | 插件加载失败 | `paseo plugin ls <id> --json` 看 error，`paseo plugin logs <id>` 看输出 |
 | 想回滚 | 从 `<home>/plugin-sync/backups/<id>-<时间>` 拷回原目录后 `paseo plugin reload <id>` |
 

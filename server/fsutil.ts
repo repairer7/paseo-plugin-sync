@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { existsSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 export type ShouldSkip = (relativePath: string, name: string, isDirectory: boolean) => boolean;
@@ -83,10 +84,35 @@ export async function replaceDirectory(
   skip: ShouldSkip,
 ): Promise<void> {
   const temporary = `${destination}.sync-new`;
+  const preserved = `${destination}.sync-node-modules`;
   await fs.rm(temporary, { recursive: true, force: true });
+  await fs.rm(preserved, { recursive: true, force: true });
   await copyDirectory(source, temporary, skip);
+
+  // Keep the target's own node_modules: the plugin compiler needs its type
+  // dependencies, and `reload` (unlike a fresh install) does not provision them.
+  let moved = false;
+  try {
+    await fs.rename(join(destination, "node_modules"), preserved);
+    moved = true;
+  } catch {
+    moved = false;
+  }
+
   await fs.rm(destination, { recursive: true, force: true });
   await fs.rename(temporary, destination);
+
+  if (moved) {
+    try {
+      if (existsSync(join(destination, "node_modules"))) {
+        await fs.rm(preserved, { recursive: true, force: true });
+      } else {
+        await fs.rename(preserved, join(destination, "node_modules"));
+      }
+    } catch {
+      // Losing the preserved tree is not fatal; type repair can reinstall it.
+    }
+  }
 }
 
 export async function removeEmptyDirs(_root: string): Promise<void> {

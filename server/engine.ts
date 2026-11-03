@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { cliJson, runCli } from "./cli.js";
 import { ensureClone, commitAndPush, remoteUrl } from "./git.js";
 import { copyDirectory, hashDirectory, makeSkip, replaceDirectory } from "./fsutil.js";
+import { ensureTypeDeps } from "./typedeps.js";
 import type { SyncSettingsValues } from "../shared/contracts.js";
 
 type Kind = "directory" | "npm" | "git" | "unknown";
@@ -124,7 +125,7 @@ export class SyncEngine {
     this.home = options.home;
     this.syncRoot = join(options.home, "plugin-sync");
     this.repoDir = join(this.syncRoot, "repo");
-    this.stagingRoot = join(this.syncRoot, "staging");
+    this.stagingRoot = join(options.home, "plugins", ".plugin-sync", "staging");
     this.backupRoot = join(this.syncRoot, "backups");
     this.tokenPath = join(this.syncRoot, "token.txt");
     this.serverId = this.readServerId();
@@ -581,10 +582,23 @@ export class SyncEngine {
             detail: `本机是 ${existing.kind} 源，源主机是文件夹源，需手动接管（会重置设置）`,
           };
         }
+        const repaired = existing.path
+          ? await this.ensureTypeDependencies(existing.path)
+          : { installed: [], missing: [] };
         const localHash = existing.path ? await hashDirectory(existing.path, this.skip) : "";
         if (localHash === desired.contentHash) {
+          let reloaded = false;
+          if (repaired.installed.length > 0 || existing.status !== "running") {
+            await this.reload(id);
+            reloaded = true;
+          }
           const changed = await this.syncEnabled(id, existing.enabled, desired.enabled);
-          return { ...base, state: "applied", detail: changed ? "内容一致，已更新启停" : "内容已是最新" };
+          const detail = reloaded
+            ? "内容一致，已修复依赖并重载"
+            : changed
+              ? "内容一致，已更新启停"
+              : "内容已是最新";
+          return { ...base, state: "applied", detail };
         }
         const sourceDir = join(this.repoDir, from, "plugins", id);
         if (!existsSync(sourceDir)) {
@@ -595,6 +609,7 @@ export class SyncEngine {
         if (this.config().installDeps && desired.installDeps) {
           await npmInstall(existing.path);
         }
+        await this.ensureTypeDependencies(existing.path);
         await this.reload(id);
         await this.syncEnabled(id, existing.enabled, desired.enabled);
         return { ...base, state: "applied", detail: "已覆盖内容并重载（设置保留，旧版本已备份）" };
@@ -633,6 +648,31 @@ export class SyncEngine {
     }
   }
 
+  private async ensureTypeDependencies(
+    directory: string,
+  ): Promise<{ installed: string[]; missing: string[] }> {
+    try {
+      const result = await ensureTypeDeps(directory, {
+        home: this.home,
+        allowInstall: this.config().installDeps,
+      });
+      if (result.installed.length > 0) {
+        this.log(`已补装类型依赖：${result.installed.join(", ")}`);
+      }
+      if (result.missing.length > 0) {
+        this.log(
+          `缺少类型依赖且未安装：${result.missing.join(", ")}（可在设置中开启“安装运行时依赖”）`,
+          "error",
+        );
+      }
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`补装类型依赖失败：${message}`, "error");
+      return { installed: [], missing: [] };
+    }
+  }
+
   private async installFromContent(
     id: string,
     sourceDir: string,
@@ -644,6 +684,7 @@ export class SyncEngine {
     if (this.config().installDeps && desired.installDeps) {
       await npmInstall(staging);
     }
+    await this.ensureTypeDependencies(staging);
     await cliJson(["plugin", "install", staging, "--id", id, "--json"], { timeoutMs: 300_000 });
   }
 
