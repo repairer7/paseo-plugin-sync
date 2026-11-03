@@ -406,6 +406,7 @@ export class SyncEngine {
     const keep = new Set<string>();
 
     for (const item of inventory) {
+      if (item.id === "plugin-sync") continue;
       const contentHash =
         item.kind === "directory" && item.path && existsSync(item.path)
           ? await hashDirectory(item.path, this.skip)
