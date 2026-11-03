@@ -111,9 +111,18 @@ function npmInstall(directory: string, specs: string[]): Promise<void> {
         "--ignore-scripts",
         "--no-audit",
         "--no-fund",
+        // Paseo daemons run with NODE_ENV=production, which makes npm default to
+        // `omit=dev`. These type packages are declared in devDependencies, so
+        // without this npm silently reports "up to date" and installs nothing.
+        "--include=dev",
         ...specs,
       ],
-      { cwd: directory, shell: process.platform === "win32", windowsHide: true },
+      {
+        cwd: directory,
+        shell: process.platform === "win32",
+        windowsHide: true,
+        env: { ...process.env, NODE_ENV: "development" },
+      },
     );
     let stderr = "";
     const timer = setTimeout(() => {
