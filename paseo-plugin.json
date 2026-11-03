@@ -1,0 +1,8 @@
+{
+  "id": "plugin-sync",
+  "name": "插件同步",
+  "description": "通过 GitHub 仓库在多台 Paseo 主机之间同步插件的安装、版本与启停状态。",
+  "requirements": {
+    "paseo": ">=0.15.0"
+  }
+}
