@@ -7,6 +7,7 @@ import { cliJson, runCli } from "./cli.js";
 import { ensureClone, commitAndPush, remoteUrl } from "./git.js";
 import { copyDirectory, hashDirectory, makeSkip, replaceDirectory } from "./fsutil.js";
 import { ensureTypeDeps } from "./typedeps.js";
+import { migrateStateDir, stateDir } from "./state.js";
 import type { SyncSettingsValues } from "../shared/contracts.js";
 
 type Kind = "directory" | "npm" | "git" | "unknown";
@@ -98,7 +99,6 @@ export class SyncEngine {
   readonly home: string;
   readonly syncRoot: string;
   readonly repoDir: string;
-  readonly stagingRoot: string;
   readonly backupRoot: string;
   readonly tokenPath: string;
   readonly serverId: string;
@@ -123,9 +123,8 @@ export class SyncEngine {
   constructor(options: EngineOptions) {
     this.options = options;
     this.home = options.home;
-    this.syncRoot = join(options.home, "plugin-sync");
+    this.syncRoot = stateDir(options.home);
     this.repoDir = join(this.syncRoot, "repo");
-    this.stagingRoot = join(options.home, "plugins", ".plugin-sync", "staging");
     this.backupRoot = join(this.syncRoot, "backups");
     this.tokenPath = join(this.syncRoot, "token.txt");
     this.serverId = this.readServerId();
@@ -167,6 +166,7 @@ export class SyncEngine {
   }
 
   async init(): Promise<void> {
+    await migrateStateDir(this.home);
     await fs.mkdir(this.syncRoot, { recursive: true });
     try {
       const result = await runCli(["--version"], { timeoutMs: 20_000 });
@@ -495,6 +495,75 @@ export class SyncEngine {
     this.published = Object.values(plugins);
   }
 
+  /**
+   * 0.1.x installed synced plugins below `<home>/plugin-sync/staging/`.
+   * Paseo has no "move installation" operation, so relocate by remove+install.
+   * The old directory is kept until the install succeeds, and is pruned by
+   * cleanupLegacyStaging afterwards.
+   */
+  private async normalizeLegacyInstalls(): Promise<void> {
+    const items = await this.listInventory();
+    for (const item of items) {
+      if (!this.isLegacyInstallPath(item.path)) continue;
+      const target = join(this.home, "plugins", item.id);
+      try {
+        await fs.mkdir(join(this.home, "plugins"), { recursive: true });
+        if (existsSync(target)) {
+          await this.backup(target, item.id);
+          await fs.rm(target, { recursive: true, force: true });
+        }
+        // Keep node_modules: the install is a relocation, not a content change.
+        await copyDirectory(item.path, target, makeSkip(true));
+        await cliJson(["plugin", "remove", item.id, "--json"], { timeoutMs: 120_000 });
+        await cliJson(["plugin", "install", target, "--id", item.id, "--json"], {
+          timeoutMs: 300_000,
+        });
+        await cliJson(["plugin", "reload", item.id, "--json"], { timeoutMs: 120_000 }).catch(
+          () => null,
+        );
+        this.log(`已把 ${item.id} 从旧 staging 迁移到 ${target}（插件设置会重置）`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.log(`迁移 ${item.id} 到标准目录失败：${message}`, "error");
+        await cliJson(["plugin", "install", item.path, "--id", item.id, "--json"], {
+          timeoutMs: 300_000,
+        }).catch(() => null);
+      }
+    }
+  }
+
+  private async cleanupLegacyStaging(inventory: InventoryItem[]): Promise<void> {
+    const legacyRoot = join(this.home, "plugin-sync");
+    const legacyStaging = join(legacyRoot, "staging");
+    if (!existsSync(legacyStaging)) return;
+    const inUse = new Set(
+      inventory
+        .map((item) => item.path.replaceAll("\\", "/"))
+        .filter((path) => path.startsWith(legacyStaging.replaceAll("\\", "/") + "/"))
+        .map((path) => path.slice(legacyStaging.replaceAll("\\", "/").length + 1).split("/")[0] ?? ""),
+    );
+    let entries: string[] = [];
+    try {
+      entries = await fs.readdir(legacyStaging);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (inUse.has(entry)) continue;
+      await fs.rm(join(legacyStaging, entry), { recursive: true, force: true }).catch(() => {});
+    }
+    try {
+      const left = await fs.readdir(legacyStaging);
+      if (left.length === 0) {
+        await fs.rm(legacyStaging, { recursive: true, force: true });
+        const rootLeft = await fs.readdir(legacyRoot);
+        if (rootLeft.length === 0) await fs.rm(legacyRoot, { recursive: true, force: true });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   private async publishWithRetry(inventory: InventoryItem[], token: string): Promise<void> {
     const config = this.config();
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -582,6 +651,26 @@ export class SyncEngine {
             detail: `本机是 ${existing.kind} 源，源主机是文件夹源，需手动接管（会重置设置）`,
           };
         }
+        if (existing.path && this.isLegacyInstallPath(existing.path)) {
+          const legacySource = join(this.repoDir, from, "plugins", id);
+          if (!existsSync(legacySource)) {
+            return { ...base, state: "failed", detail: "源主机没有上传该插件内容" };
+          }
+          const target = join(this.home, "plugins", id);
+          await fs.mkdir(join(this.home, "plugins"), { recursive: true });
+          if (existsSync(target)) await this.backup(target, id);
+          await copyDirectory(legacySource, target, this.skip);
+          if (this.config().installDeps && desired.installDeps) await npmInstall(target);
+          await this.ensureTypeDependencies(target);
+          await cliJson(["plugin", "remove", id, "--json"], { timeoutMs: 120_000 });
+          await cliJson(["plugin", "install", target, "--id", id, "--json"], { timeoutMs: 300_000 });
+          await this.syncEnabled(id, true, desired.enabled);
+          return {
+            ...base,
+            state: "applied",
+            detail: `已从旧 staging 迁移到 ${target}（插件设置会重置，数据文件不受影响）`,
+          };
+        }
         const repaired = existing.path
           ? await this.ensureTypeDependencies(existing.path)
           : { installed: [], missing: [] };
@@ -648,6 +737,14 @@ export class SyncEngine {
     }
   }
 
+  private isLegacyInstallPath(path: string): boolean {
+    const normalized = path.replaceAll("\\", "/");
+    return (
+      normalized.includes("/plugin-sync/staging/") ||
+      normalized.includes("/.plugin-sync/staging/")
+    );
+  }
+
   private async ensureTypeDependencies(
     directory: string,
   ): Promise<{ installed: string[]; missing: string[] }> {
@@ -678,14 +775,18 @@ export class SyncEngine {
     sourceDir: string,
     desired: RepoPlugin,
   ): Promise<void> {
-    const staging = join(this.stagingRoot, id);
-    await fs.rm(staging, { recursive: true, force: true });
-    await copyDirectory(sourceDir, staging, this.skip);
-    if (this.config().installDeps && desired.installDeps) {
-      await npmInstall(staging);
+    const target = join(this.home, "plugins", id);
+    if (existsSync(target)) {
+      await this.backup(target, id);
+      await replaceDirectory(sourceDir, target, this.skip);
+    } else {
+      await copyDirectory(sourceDir, target, this.skip);
     }
-    await this.ensureTypeDependencies(staging);
-    await cliJson(["plugin", "install", staging, "--id", id, "--json"], { timeoutMs: 300_000 });
+    if (this.config().installDeps && desired.installDeps) {
+      await npmInstall(target);
+    }
+    await this.ensureTypeDependencies(target);
+    await cliJson(["plugin", "install", target, "--id", id, "--json"], { timeoutMs: 300_000 });
   }
 
   private async backup(path: string, id: string): Promise<void> {
@@ -731,10 +832,12 @@ export class SyncEngine {
       this.log(`开始同步（${apply ? "应用" : "只读"}）→ ${config.repo}@${config.branch}`);
       await ensureClone(this.repoDir, config.repo, config.proxyBase, config.branch, token);
       await this.readRemote();
+      await this.normalizeLegacyInstalls();
       const before = await this.listInventory();
       const remote = await this.readRemote();
       if (apply) await this.reconcile(remote, before);
       const after = await this.listInventory();
+      await this.cleanupLegacyStaging(after);
       await this.publishWithRetry(after, token);
       this.hosts = (await this.readRemote()).hosts;
       this.lastRunAt = new Date().toISOString();

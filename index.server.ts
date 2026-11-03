@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { SyncEngine } from "./server/engine.js";
+import { migrateStateDir, stateDir } from "./server/state.js";
 import {
   clearTokenRpc,
   importTokenRpc,
@@ -26,12 +27,12 @@ const DEFAULTS: SyncSettingsValues = {
 
 export default function contribute(server: PluginServerContext) {
   const home = process.env.PASEO_HOME?.trim() || join(homedir(), ".paseo");
-  const configPath = join(home, "plugin-sync", "config.json");
+  const configPath = join(stateDir(home), "config.json");
   let config: SyncSettingsValues = { ...DEFAULTS };
 
   const persist = async (next: SyncSettingsValues): Promise<string | null> => {
     try {
-      await fs.mkdir(join(home, "plugin-sync"), { recursive: true });
+      await fs.mkdir(stateDir(home), { recursive: true });
       await fs.writeFile(configPath, `${JSON.stringify(next, null, 2)}
 `, "utf8");
       config = next;
@@ -93,6 +94,7 @@ export default function contribute(server: PluginServerContext) {
 
   void (async () => {
     try {
+      await migrateStateDir(home);
       const stored = JSON.parse(await fs.readFile(configPath, "utf8")) as Partial<SyncSettingsValues>;
       config = { ...DEFAULTS, ...stored };
     } catch {
