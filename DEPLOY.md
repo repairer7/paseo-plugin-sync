@@ -109,9 +109,14 @@ chmod 600 ~/.paseo/plugin-sync/token.txt
 
 配置保存在 `<home>/plugins/.plugin-sync/config.json`，token 保存在 `<home>/plugins/.plugin-sync/token.txt`。
 
-安装位置：同步安装的目录型插件直接落在 `<home>/plugins/<id>`，和手动安装一致。同步插件自身的仓库克隆、备份、token、配置都在 `<home>/plugins/.plugin-sync/`（隐藏目录，属于状态，不是插件）。
+安装位置：同步安装的目录型插件直接落在 `<home>/plugins/<id>`，和手动安装一致。同步插件自身的仓库克隆、token、配置都在 `<home>/plugins/.plugin-sync/`（隐藏目录，属于状态，不是插件）。**同步插件不保留任何插件备份。**
 
-注意：`<home>/recycle-bin/`、`<home>/api-panel/` 这类目录是**插件自己的数据**（回收站记录、API 密钥），不是同步插件建的，也不属于安装目录；同步只动 `<home>/plugins/`。
+插件数据：按 0.2.1 的约定，插件自己的状态放到 `<home>/plugins/.data/<id>/`，例如：
+
+- `<home>/plugins/.data/api-panel/secret.json`（API 面板密钥）
+- `<home>/plugins/.data/recycle-bin/purged-sessions.json`（回收站记录）
+
+旧位置 `<home>/api-panel/`、`<home>/recycle-bin/` 会在插件首次运行时自动迁移。这些是**数据**，不是安装目录，也不随同步覆盖。
 
 ---
 
@@ -161,7 +166,7 @@ recycle-bin   ☑ fnOS    ☑ HomeWindows
 | 目标机现状 | 行为 | 设置是否保留 |
 |---|---|---|
 | 没装 | 从源主机内容安装到 `<home>/plugins/<id>`，或按 npm/git 源安装 | — |
-| 已装，目录源 | 先备份到 `<home>/plugins/.plugin-sync/backups/<id>-<时间>`，原地覆盖内容，`plugin reload` | **保留** |
+| 已装，目录源 | 原地覆盖内容，`plugin reload` | **保留** |
 | 已装，npm 源 | `paseo plugin update <id> --version <版本> --yes` | **保留** |
 | 已装，git 源 | `paseo plugin update <id> --ref <ref> --yes` | **保留** |
 | 来源类型不同（目录 ↔ npm/git） | 标记 `conflict`，不自动处理；需要用户确认后手动 `remove` + `install` | 会丢 |
@@ -185,9 +190,9 @@ recycle-bin   ☑ fnOS    ☑ HomeWindows
 | 目标机没收到 | 目标机是否在线、轮询是否开启、源主机 `targets` 是否包含目标文件夹名、目标机日志 |
 | `conflict` | 来源类型不同，或目标机路径受管；让用户确认是否 `remove` 后重装 |
 | `npm ci` 失败 | 目标机没有 npm、或网络不通；改用 git/npm 源 |
-| `Could not resolve type dependency "@getpaseo/client"` | 0.1.2 起会自动补装类型依赖（强制 `--include=dev`，不受 `NODE_ENV=production` 影响）；先 `paseo plugin update plugin-sync --yes` 再等一轮同步 |
+| `Could not resolve type dependency "@getpaseo/client"` | 0.2.1 起会自动补装类型依赖（强制 `--include=dev`，不受 `NODE_ENV=production` 影响）；先 `paseo plugin update plugin-sync --yes` 再等一轮同步 |
 | 插件加载失败 | `paseo plugin ls <id> --json` 看 error，`paseo plugin logs <id>` 看输出 |
-| 想回滚 | 从 `<home>/plugins/.plugin-sync/backups/<id>-<时间>` 拷回原目录后 `paseo plugin reload <id>` |
+| 想回滚 | 插件不保留本地备份；在源主机把内容改回并重新同步，或手动从 Git 历史取出旧版本覆盖后 `paseo plugin reload <id>` |
 
 常用命令：
 
@@ -207,7 +212,6 @@ paseo plugin remove plugin-sync
 - token 建议用经典 PAT（`repo` 权限）或只授权这一个仓库的 fine-grained token；泄露后立即撤销。
 - token 只保存在本机 `<home>/plugins/.plugin-sync/token.txt`，界面不回显，不写入仓库，不写日志。
 - 私有仓库不要设为公开；公开仓库只放同步插件源码（无 token）。
-- 覆盖已有插件前会自动备份，保留最近 3 份。
 
 ---
 

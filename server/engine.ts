@@ -99,7 +99,6 @@ export class SyncEngine {
   readonly home: string;
   readonly syncRoot: string;
   readonly repoDir: string;
-  readonly backupRoot: string;
   readonly tokenPath: string;
   readonly serverId: string;
   readonly hostname: string;
@@ -125,7 +124,6 @@ export class SyncEngine {
     this.home = options.home;
     this.syncRoot = stateDir(options.home);
     this.repoDir = join(this.syncRoot, "repo");
-    this.backupRoot = join(this.syncRoot, "backups");
     this.tokenPath = join(this.syncRoot, "token.txt");
     this.serverId = this.readServerId();
     this.hostname = this.sanitize(osHostname());
@@ -168,6 +166,8 @@ export class SyncEngine {
   async init(): Promise<void> {
     await migrateStateDir(this.home);
     await fs.mkdir(this.syncRoot, { recursive: true });
+    // Backups are no longer produced; remove leftovers from 0.1.x.
+    await fs.rm(join(this.syncRoot, "backups"), { recursive: true, force: true }).catch(() => {});
     try {
       const result = await runCli(["--version"], { timeoutMs: 20_000 });
       this.paseoVersion = result.stdout.trim().split(/\r?\n/).pop() ?? "";
@@ -508,10 +508,7 @@ export class SyncEngine {
       const target = join(this.home, "plugins", item.id);
       try {
         await fs.mkdir(join(this.home, "plugins"), { recursive: true });
-        if (existsSync(target)) {
-          await this.backup(target, item.id);
-          await fs.rm(target, { recursive: true, force: true });
-        }
+        if (existsSync(target)) await fs.rm(target, { recursive: true, force: true });
         // Keep node_modules: the install is a relocation, not a content change.
         await copyDirectory(item.path, target, makeSkip(true));
         await cliJson(["plugin", "remove", item.id, "--json"], { timeoutMs: 120_000 });
@@ -658,7 +655,7 @@ export class SyncEngine {
           }
           const target = join(this.home, "plugins", id);
           await fs.mkdir(join(this.home, "plugins"), { recursive: true });
-          if (existsSync(target)) await this.backup(target, id);
+          if (existsSync(target)) await fs.rm(target, { recursive: true, force: true });
           await copyDirectory(legacySource, target, this.skip);
           if (this.config().installDeps && desired.installDeps) await npmInstall(target);
           await this.ensureTypeDependencies(target);
@@ -693,7 +690,6 @@ export class SyncEngine {
         if (!existsSync(sourceDir)) {
           return { ...base, state: "failed", detail: "源主机没有上传该插件内容" };
         }
-        await this.backup(existing.path, id);
         await replaceDirectory(sourceDir, existing.path, this.skip);
         if (this.config().installDeps && desired.installDeps) {
           await npmInstall(existing.path);
@@ -777,7 +773,6 @@ export class SyncEngine {
   ): Promise<void> {
     const target = join(this.home, "plugins", id);
     if (existsSync(target)) {
-      await this.backup(target, id);
       await replaceDirectory(sourceDir, target, this.skip);
     } else {
       await copyDirectory(sourceDir, target, this.skip);
@@ -787,19 +782,6 @@ export class SyncEngine {
     }
     await this.ensureTypeDependencies(target);
     await cliJson(["plugin", "install", target, "--id", id, "--json"], { timeoutMs: 300_000 });
-  }
-
-  private async backup(path: string, id: string): Promise<void> {
-    if (!path || !existsSync(path)) return;
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const destination = join(this.backupRoot, `${id}-${stamp}`);
-    await fs.mkdir(this.backupRoot, { recursive: true });
-    await copyDirectory(path, destination, makeSkip(true));
-    const entries = (await fs.readdir(this.backupRoot)).filter((name) => name.startsWith(`${id}-`)).sort();
-    while (entries.length > 3) {
-      const oldest = entries.shift();
-      if (oldest) await fs.rm(join(this.backupRoot, oldest), { recursive: true, force: true });
-    }
   }
 
   private async reload(id: string): Promise<void> {
