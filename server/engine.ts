@@ -16,6 +16,12 @@ export interface SourceSpec {
   spec: string;
   version: string;
   ref: string;
+  /** Extra identity fields so a host that lacks the plugin can install it. */
+  remote?: string;
+  pluginPath?: string;
+  packageName?: string;
+  registryUrl?: string;
+  registryId?: string;
 }
 
 export interface RepoPlugin {
@@ -69,6 +75,11 @@ export interface InventoryItem {
   version: string;
   ref: string;
   hasRuntimeDeps: boolean;
+  remote: string;
+  pluginPath: string;
+  packageName: string;
+  registryUrl: string;
+  registryId: string;
 }
 
 export interface SyncResult {
@@ -305,7 +316,13 @@ export class SyncEngine {
       if (!id) continue;
       const path = String(entry.path ?? "");
       const installation = (entry.installation ?? {}) as {
-        identity?: { kind?: string; remote?: string; packageName?: string };
+        identity?: {
+          kind?: string;
+          remote?: string;
+          packageName?: string;
+          pluginPath?: string;
+          registry?: { url?: string; id?: string };
+        };
         currentRevision?: string;
       };
       const identity = installation.identity;
@@ -324,6 +341,11 @@ export class SyncEngine {
         version,
         ref,
         hasRuntimeDeps: await hasRuntimeDependencies(path),
+        remote: identity?.remote ?? "",
+        pluginPath: identity?.pluginPath ?? "",
+        packageName: identity?.packageName ?? "",
+        registryUrl: identity?.registry?.url ?? "",
+        registryId: identity?.registry?.id ?? "",
       });
     }
     return items;
@@ -424,6 +446,11 @@ export class SyncEngine {
           spec: item.kind === "npm" ? `npm:${item.id}` : item.kind === "git" ? "" : "",
           version: item.version,
           ref: item.ref,
+          remote: item.remote,
+          pluginPath: item.pluginPath,
+          packageName: item.packageName,
+          registryUrl: item.registryUrl,
+          registryId: item.registryId,
         },
         path: item.path,
         contentHash,
@@ -442,8 +469,7 @@ export class SyncEngine {
         previousEntry.name === entry.name &&
         previousEntry.installDeps === entry.installDeps &&
         previousEntry.platform === entry.platform &&
-        previousEntry.source.version === entry.source.version &&
-        previousEntry.source.ref === entry.source.ref &&
+        sameSource(previousEntry.source, entry.source) &&
         previousEntry.published === entry.published;
       if (unchanged) entry.updatedAt = previousEntry.updatedAt;
       plugins[item.id] = entry;
@@ -637,6 +663,18 @@ export class SyncEngine {
           await this.installFromContent(id, sourceDir, desired);
           return { ...base, state: "applied", detail: "已安装（文件夹源）" };
         }
+        if (desired.kind === "npm" || desired.kind === "git") {
+          await this.installFromSource(id, desired);
+          const installed = (await this.listInventory()).find((item) => item.id === id);
+          const changed = await this.syncEnabled(id, installed?.enabled ?? true, desired.enabled);
+          return {
+            ...base,
+            state: "applied",
+            detail: changed
+              ? `已安装（${desired.kind} 源），并按源主机禁用`
+              : `已安装（${desired.kind} 源）`,
+          };
+        }
         return { ...base, state: "skipped", detail: "该条目没有内容快照，且不是 npm/git 源" };
       }
 
@@ -764,6 +802,63 @@ export class SyncEngine {
       this.log(`补装类型依赖失败：${message}`, "error");
       return { installed: [], missing: [] };
     }
+  }
+
+  /**
+   * Install a plugin that this host does not have yet, from the source the
+   * publishing host recorded (registry, Git remote, or npm package). Only fails
+   * when the remote entry predates source metadata, which needs the publishing
+   * host to sync once with a current plugin-sync.
+   */
+  private async installFromSource(id: string, desired: RepoPlugin): Promise<void> {
+    const source = desired.source ?? ({ spec: "", version: "", ref: "" } as SourceSpec);
+    const candidates: Array<{ reference: string; includePath: boolean }> = [];
+
+    if (desired.kind === "npm") {
+      const name = source.packageName;
+      if (!name) {
+        throw new Error(
+          "源主机发布记录缺少 npm 包名，无法在本机安装；请在源主机升级 plugin-sync 后重新同步",
+        );
+      }
+      candidates.push({ reference: `npm:${name}${source.version ? `@${source.version}` : ""}`, includePath: false });
+    } else if (desired.kind === "git") {
+      const registryHost = safeHost(source.registryUrl ?? "");
+      if (registryHost && source.registryId) {
+        // Prefer the registry form the publishing host installed from; the
+        // registry already knows the in-repo plugin path.
+        candidates.push({ reference: `${registryHost}/${source.registryId}`, includePath: false });
+      }
+      if (source.remote) {
+        candidates.push({ reference: `git:${source.remote}`, includePath: true });
+      }
+      if (candidates.length === 0) {
+        throw new Error(
+          "源主机发布记录缺少 Git 地址，无法在本机安装；请在源主机升级 plugin-sync 后重新同步",
+        );
+      }
+    } else {
+      throw new Error("无法识别的来源类型");
+    }
+
+    const failures: string[] = [];
+    for (const candidate of candidates) {
+      const args = ["plugin", "install", candidate.reference, "--id", id];
+      if (candidate.includePath && source.pluginPath && source.pluginPath !== ".") {
+        args.push("--path", source.pluginPath);
+      }
+      if (desired.kind === "git" && source.ref) args.push("--ref", source.ref);
+      args.push("--json");
+      try {
+        await cliJson(args, { timeoutMs: 600_000 });
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failures.push(`${candidate.reference}: ${message}`);
+        this.log(`从 ${candidate.reference} 安装 ${id} 失败，尝试下一个来源`, "error");
+      }
+    }
+    throw new Error(failures.join(" | ").slice(0, 800));
   }
 
   private async installFromContent(
@@ -926,6 +1021,27 @@ export class SyncEngine {
   async saveConfig(patch: Partial<SyncSettingsValues>): Promise<string | null> {
     return this.options.saveConfig(patch);
   }
+}
+
+function safeHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
+
+/** Treat a repo entry written by an older plugin-sync as "source changed" once. */
+function sameSource(a: SourceSpec, b: SourceSpec): boolean {
+  return (
+    (a.version ?? "") === (b.version ?? "") &&
+    (a.ref ?? "") === (b.ref ?? "") &&
+    (a.remote ?? "") === (b.remote ?? "") &&
+    (a.pluginPath ?? "") === (b.pluginPath ?? "") &&
+    (a.packageName ?? "") === (b.packageName ?? "") &&
+    (a.registryUrl ?? "") === (b.registryUrl ?? "") &&
+    (a.registryId ?? "") === (b.registryId ?? "")
+  );
 }
 
 async function hasRuntimeDependencies(directory: string): Promise<boolean> {
