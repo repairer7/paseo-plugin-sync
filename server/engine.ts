@@ -812,7 +812,7 @@ export class SyncEngine {
    */
   private async installFromSource(id: string, desired: RepoPlugin): Promise<void> {
     const source = desired.source ?? ({ spec: "", version: "", ref: "" } as SourceSpec);
-    const candidates: Array<{ reference: string; includePath: boolean }> = [];
+    const candidates: Array<{ reference: string; includePath: boolean; includeRef: boolean }> = [];
 
     if (desired.kind === "npm") {
       const name = source.packageName;
@@ -821,16 +821,28 @@ export class SyncEngine {
           "源主机发布记录缺少 npm 包名，无法在本机安装；请在源主机升级 plugin-sync 后重新同步",
         );
       }
-      candidates.push({ reference: `npm:${name}${source.version ? `@${source.version}` : ""}`, includePath: false });
+      candidates.push({
+        reference: `npm:${name}${source.version ? `@${source.version}` : ""}`,
+        includePath: true,
+        includeRef: false,
+      });
     } else if (desired.kind === "git") {
+      if (source.remote) {
+        candidates.push({
+          reference: `git:${source.remote}`,
+          includePath: true,
+          includeRef: true,
+        });
+      }
       const registryHost = safeHost(source.registryUrl ?? "");
       if (registryHost && source.registryId) {
-        // Prefer the registry form the publishing host installed from; the
-        // registry already knows the in-repo plugin path.
-        candidates.push({ reference: `${registryHost}/${source.registryId}`, includePath: false });
-      }
-      if (source.remote) {
-        candidates.push({ reference: `git:${source.remote}`, includePath: true });
+        // Registry installs pin their own reviewed revision (Paseo rejects --ref),
+        // so this is only a fallback for entries without a Git remote.
+        candidates.push({
+          reference: `${registryHost}/${source.registryId}`,
+          includePath: false,
+          includeRef: false,
+        });
       }
       if (candidates.length === 0) {
         throw new Error(
@@ -847,7 +859,9 @@ export class SyncEngine {
       if (candidate.includePath && source.pluginPath && source.pluginPath !== ".") {
         args.push("--path", source.pluginPath);
       }
-      if (desired.kind === "git" && source.ref) args.push("--ref", source.ref);
+      if (candidate.includeRef && desired.kind === "git" && source.ref) {
+        args.push("--ref", source.ref);
+      }
       args.push("--json");
       try {
         await cliJson(args, { timeoutMs: 600_000 });
